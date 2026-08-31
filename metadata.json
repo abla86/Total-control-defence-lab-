@@ -1,0 +1,6 @@
+{
+  "name": "Agent Defense Lab",
+  "description": "Interactive AI Agent Security Evaluation, Worm Propagation Simulation, and Provenance Defense Workbench based on NIST & OWASP threat research.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
