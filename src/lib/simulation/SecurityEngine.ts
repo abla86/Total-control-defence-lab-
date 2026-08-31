@@ -26,6 +26,7 @@ export class SecurityEngine {
     updatedNodes: AgentNode[];
     updatedEdges: NetworkEdge[];
     auditLogs: AuditLogEntry[];
+    updatedDefenses: DefenseModule[];
   } {
     const startTime = performance.now();
     const steps: SimulationStep[] = [];
@@ -34,11 +35,18 @@ export class SecurityEngine {
     const infectedNodeIds = new Set<string>();
     const protectedNodeIds = new Set<string>();
     const updatedEdges = edges.map((e) => ({ ...e, isInfected: false, isBlocked: false }));
+    // Clone caller-owned defense state; simulation must never mutate its inputs.
+    const updatedDefenses = defenses.map((d) => ({ ...d }));
 
     // Clone nodes for immutability
     const currentNodes: AgentNode[] = nodes.map((n) => {
       nodeStateMap[n.id] = 'clean';
-      return { ...n, status: 'clean', infectionHistory: [...n.infectionHistory] };
+      return {
+        ...n,
+        status: 'clean',
+        infectionHistory: [...n.infectionHistory],
+        memoryData: n.memoryData ? { ...n.memoryData } : n.memoryData,
+      };
     });
 
     let currentPayload = attack.payload;
@@ -78,7 +86,7 @@ export class SecurityEngine {
       let decisionReason = 'No active defense rule triggered for this pattern.';
 
       // Defense Check: Worm Signature Sentinel
-      const wormDefense = defenses.find((d) => d.id === 'worm_pattern_scanner' && d.enabled);
+      const wormDefense = updatedDefenses.find((d) => d.id === 'worm_pattern_scanner' && d.enabled);
       if (wormDefense) {
         const wormPatterns = [
           /repeat this/i,
@@ -104,7 +112,7 @@ export class SecurityEngine {
       }
 
       // Defense Check: Provenance-Driven Authorization Firewall
-      const provDefense = defenses.find((d) => d.id === 'provenance_firewall' && d.enabled);
+      const provDefense = updatedDefenses.find((d) => d.id === 'provenance_firewall' && d.enabled);
       if (provDefense && finalVerdict !== 'DENY') {
         const isHighRiskAction =
           attack.severity === 'CRITICAL' ||
@@ -124,7 +132,7 @@ export class SecurityEngine {
       }
 
       // Defense Check: Tool Capability Drift Sentinel
-      const driftDefense = defenses.find((d) => d.id === 'tool_drift_detector' && d.enabled);
+      const driftDefense = updatedDefenses.find((d) => d.id === 'tool_drift_detector' && d.enabled);
       if (driftDefense && attack.category === 'tool_poisoning' && finalVerdict !== 'DENY') {
         triggeredDefenseIds.push(driftDefense.id);
         driftDefense.blockedCount++;
@@ -133,7 +141,7 @@ export class SecurityEngine {
       }
 
       // Defense Check: Deterministic Request-Hash Firewall
-      const hashDefense = defenses.find((d) => d.id === 'request_hash_firewall' && d.enabled);
+      const hashDefense = updatedDefenses.find((d) => d.id === 'request_hash_firewall' && d.enabled);
       if (hashDefense && attempt > 2 && attack.propagationStrategy.adaptiveMutation && finalVerdict !== 'DENY') {
         triggeredDefenseIds.push(hashDefense.id);
         hashDefense.blockedCount++;
@@ -142,7 +150,7 @@ export class SecurityEngine {
       }
 
       // Defense Check: Evaluation Cheating Guard
-      const evalDefense = defenses.find((d) => d.id === 'eval_integrity_guard' && d.enabled);
+      const evalDefense = updatedDefenses.find((d) => d.id === 'eval_integrity_guard' && d.enabled);
       if (evalDefense && attack.category === 'evaluation_cheating' && finalVerdict !== 'DENY') {
         triggeredDefenseIds.push(evalDefense.id);
         evalDefense.blockedCount++;
@@ -151,7 +159,7 @@ export class SecurityEngine {
       }
 
       // Defense Check: RAG Evidence Integrity Verifier
-      const ragDefense = defenses.find((d) => d.id === 'rag_evidence_verifier' && d.enabled);
+      const ragDefense = updatedDefenses.find((d) => d.id === 'rag_evidence_verifier' && d.enabled);
       if (ragDefense && attack.category === 'rag_corruption' && finalVerdict !== 'DENY') {
         triggeredDefenseIds.push(ragDefense.id);
         ragDefense.blockedCount++;
@@ -310,6 +318,7 @@ export class SecurityEngine {
       updatedNodes: currentNodes,
       updatedEdges,
       auditLogs,
+      updatedDefenses,
     };
   }
 
@@ -334,10 +343,12 @@ export class SecurityEngine {
     };
   } {
     const results: SimulationResult[] = [];
+    let currentDefenses = defenses.map((d) => ({ ...d }));
 
     attacks.forEach((attack) => {
-      const { result } = this.runSimulation(attack, nodes, edges, defenses);
+      const { result, updatedDefenses } = this.runSimulation(attack, nodes, edges, currentDefenses);
       results.push(result);
+      currentDefenses = updatedDefenses;
     });
 
     const totalTests = results.length;
