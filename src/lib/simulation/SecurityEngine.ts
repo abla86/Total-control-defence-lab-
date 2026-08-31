@@ -25,6 +25,7 @@ export class SecurityEngine {
     result: SimulationResult;
     updatedNodes: AgentNode[];
     updatedEdges: NetworkEdge[];
+    updatedDefenses: DefenseModule[];
     auditLogs: AuditLogEntry[];
   } {
     const startTime = performance.now();
