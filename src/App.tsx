@@ -74,7 +74,7 @@ export default function App() {
     setActiveTab('topology');
 
     setTimeout(() => {
-      const { result, updatedNodes, updatedEdges, auditLogs: newLogs } = SecurityEngine.runSimulation(
+      const { result, updatedNodes, updatedEdges, updatedDefenses, auditLogs: newLogs } = SecurityEngine.runSimulation(
         attack,
         nodes,
         edges,
@@ -83,6 +83,7 @@ export default function App() {
 
       setNodes(updatedNodes);
       setEdges(updatedEdges);
+      setDefenses(updatedDefenses);
       setLastSimulation(result);
       setAuditLogs((prev) => [...newLogs, ...prev]);
       setIsRunning(false);
@@ -105,7 +106,7 @@ export default function App() {
     if (switchTab) setActiveTab('benchmark');
 
     setTimeout(() => {
-      const { results, overallScore, metrics } = SecurityEngine.runBenchmarkSuite(
+      const { results, overallScore, metrics, updatedDefenses } = SecurityEngine.runBenchmarkSuite(
         INITIAL_NODES,
         INITIAL_EDGES,
         defenses,
@@ -128,6 +129,7 @@ export default function App() {
 
       setBenchmarkResults(results);
       setBenchmarkMetrics(summaryMetrics);
+      setDefenses(updatedDefenses);
 
       // Populate audit logs from the benchmark runs
       const logsFromBench: AuditLogEntry[] = [];
