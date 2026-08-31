@@ -74,7 +74,7 @@ export default function App() {
     setActiveTab('topology');
 
     setTimeout(() => {
-      const { result, updatedNodes, updatedEdges, auditLogs: newLogs } = SecurityEngine.runSimulation(
+      const { result, updatedNodes, updatedEdges, updatedDefenses, auditLogs: newLogs } = SecurityEngine.runSimulation(
         attack,
         nodes,
         edges,
@@ -83,6 +83,7 @@ export default function App() {
 
       setNodes(updatedNodes);
       setEdges(updatedEdges);
+      setDefenses(updatedDefenses);
       setLastSimulation(result);
       setAuditLogs((prev) => [...newLogs, ...prev]);
       setIsRunning(false);
