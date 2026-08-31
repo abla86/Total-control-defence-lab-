@@ -35,10 +35,29 @@ export class SecurityEngine {
     const protectedNodeIds = new Set<string>();
     const updatedEdges = edges.map((e) => ({ ...e, isInfected: false, isBlocked: false }));
 
+    // Clone caller-owned defenses, including nested rule arrays, so simulation never mutates input state.
+    const currentDefenses: DefenseModule[] = defenses.map((d) => ({
+      ...d,
+      rules: d.rules.map((r) => ({ ...r })),
+    }));
+
     // Clone nodes for immutability
     const currentNodes: AgentNode[] = nodes.map((n) => {
       nodeStateMap[n.id] = 'clean';
-      return { ...n, status: 'clean', infectionHistory: [...n.infectionHistory] };
+      return {
+        ...n,
+        status: 'clean',
+        infectionHistory: n.infectionHistory.map((entry) => ({ ...entry })),
+        memoryData: n.memoryData ? { ...n.memoryData } : n.memoryData,
+        permissions: [...n.permissions],
+        toolSchema: n.toolSchema
+          ? {
+              ...n.toolSchema,
+              parameters: [...n.toolSchema.parameters],
+              allowedCallers: [...n.toolSchema.allowedCallers],
+            }
+          : n.toolSchema,
+      };
     });
 
     let currentPayload = attack.payload;
@@ -78,7 +97,7 @@ export class SecurityEngine {
       let decisionReason = 'No active defense rule triggered for this pattern.';
 
       // Defense Check: Worm Signature Sentinel
-      const wormDefense = defenses.find((d) => d.id === 'worm_pattern_scanner' && d.enabled);
+      const wormDefense = currentDefenses.find((d) => d.id === 'worm_pattern_scanner' && d.enabled);
       if (wormDefense) {
         const wormPatterns = [
           /repeat this/i,
@@ -104,7 +123,7 @@ export class SecurityEngine {
       }
 
       // Defense Check: Provenance-Driven Authorization Firewall
-      const provDefense = defenses.find((d) => d.id === 'provenance_firewall' && d.enabled);
+      const provDefense = currentDefenses.find((d) => d.id === 'provenance_firewall' && d.enabled);
       if (provDefense && finalVerdict !== 'DENY') {
         const isHighRiskAction =
           attack.severity === 'CRITICAL' ||
@@ -124,7 +143,7 @@ export class SecurityEngine {
       }
 
       // Defense Check: Tool Capability Drift Sentinel
-      const driftDefense = defenses.find((d) => d.id === 'tool_drift_detector' && d.enabled);
+      const driftDefense = currentDefenses.find((d) => d.id === 'tool_drift_detector' && d.enabled);
       if (driftDefense && attack.category === 'tool_poisoning' && finalVerdict !== 'DENY') {
         triggeredDefenseIds.push(driftDefense.id);
         driftDefense.blockedCount++;
@@ -133,7 +152,7 @@ export class SecurityEngine {
       }
 
       // Defense Check: Deterministic Request-Hash Firewall
-      const hashDefense = defenses.find((d) => d.id === 'request_hash_firewall' && d.enabled);
+      const hashDefense = currentDefenses.find((d) => d.id === 'request_hash_firewall' && d.enabled);
       if (hashDefense && attempt > 2 && attack.propagationStrategy.adaptiveMutation && finalVerdict !== 'DENY') {
         triggeredDefenseIds.push(hashDefense.id);
         hashDefense.blockedCount++;
@@ -142,7 +161,7 @@ export class SecurityEngine {
       }
 
       // Defense Check: Evaluation Cheating Guard
-      const evalDefense = defenses.find((d) => d.id === 'eval_integrity_guard' && d.enabled);
+      const evalDefense = currentDefenses.find((d) => d.id === 'eval_integrity_guard' && d.enabled);
       if (evalDefense && attack.category === 'evaluation_cheating' && finalVerdict !== 'DENY') {
         triggeredDefenseIds.push(evalDefense.id);
         evalDefense.blockedCount++;
@@ -151,7 +170,7 @@ export class SecurityEngine {
       }
 
       // Defense Check: RAG Evidence Integrity Verifier
-      const ragDefense = defenses.find((d) => d.id === 'rag_evidence_verifier' && d.enabled);
+      const ragDefense = currentDefenses.find((d) => d.id === 'rag_evidence_verifier' && d.enabled);
       if (ragDefense && attack.category === 'rag_corruption' && finalVerdict !== 'DENY') {
         triggeredDefenseIds.push(ragDefense.id);
         ragDefense.blockedCount++;
@@ -309,6 +328,7 @@ export class SecurityEngine {
       result,
       updatedNodes: currentNodes,
       updatedEdges,
+      updatedDefenses: currentDefenses,
       auditLogs,
     };
   }
