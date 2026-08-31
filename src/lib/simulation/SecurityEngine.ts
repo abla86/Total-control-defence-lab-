@@ -12,9 +12,35 @@ import {
 } from '../../types/security';
 import { syncHash } from './crypto';
 
+function cloneDefense(defense: DefenseModule): DefenseModule {
+  return {
+    ...defense,
+    rules: defense.rules.map((rule) => ({ ...rule })),
+  };
+}
+
+function cloneNode(node: AgentNode): AgentNode {
+  return {
+    ...node,
+    permissions: [...node.permissions],
+    infectionHistory: node.infectionHistory.map((entry) => ({ ...entry })),
+    memoryData: node.memoryData ? { ...node.memoryData } : undefined,
+    toolSchema: node.toolSchema
+      ? {
+          ...node.toolSchema,
+          parameters: [...node.toolSchema.parameters],
+          allowedCallers: [...node.toolSchema.allowedCallers],
+        }
+      : undefined,
+  };
+}
+
 export class SecurityEngine {
   /**
    * Evaluates an incoming attack vector against the current node topology and active defenses.
+   *
+   * The simulation is intentionally side-effect free with respect to caller-owned state:
+   * nodes, edges, defenses and their nested collections are cloned before simulation.
    */
   static runSimulation(
     attack: AttackVector,
@@ -33,13 +59,18 @@ export class SecurityEngine {
     const nodeStateMap: Record<string, NodeStatus> = {};
     const infectedNodeIds = new Set<string>();
     const protectedNodeIds = new Set<string>();
-    const updatedEdges = edges.map((e) => ({ ...e, isInfected: false, isBlocked: false }));
 
-    // Clone nodes for immutability
-    const currentNodes: AgentNode[] = nodes.map((n) => {
-      nodeStateMap[n.id] = 'clean';
-      return { ...n, status: 'clean', infectionHistory: [...n.infectionHistory] };
+    // Clone every caller-owned collection before applying simulation state.
+    const updatedEdges = edges.map((edge) => ({
+      ...edge,
+      isInfected: false,
+      isBlocked: false,
+    }));
+    const currentNodes: AgentNode[] = nodes.map((node) => {
+      nodeStateMap[node.id] = 'clean';
+      return { ...cloneNode(node), status: 'clean' };
     });
+    const currentDefenses = defenses.map(cloneDefense);
 
     let currentPayload = attack.payload;
     let breached = false;
@@ -47,13 +78,22 @@ export class SecurityEngine {
     let attemptsCompleted = 0;
     const maxAttempts = Math.max(1, attack.maxAttempts || 1);
 
-    // Identify entry node based on target type
-    const targetNode = currentNodes.find((n) => n.type === attack.targetNodeType) || currentNodes[1] || currentNodes[0];
-    const initialSourceNode = currentNodes.find((n) => n.type === 'user') || currentNodes[0];
+    const targetNode =
+      currentNodes.find((node) => node.type === attack.targetNodeType) ||
+      currentNodes[1] ||
+      currentNodes[0];
+    const initialSourceNode =
+      currentNodes.find((node) => node.type === 'user') || currentNodes[0];
 
-    // Determine initial provenance
+    if (!targetNode || !initialSourceNode) {
+      throw new Error('SecurityEngine requires at least one node.');
+    }
+
     let currentProvenance: ProvenanceSource = 'USER';
-    if (attack.category === 'tool_poisoning' || attack.category === 'privilege_escalation') {
+    if (
+      attack.category === 'tool_poisoning' ||
+      attack.category === 'privilege_escalation'
+    ) {
       currentProvenance = 'WEB_UNTRUSTED';
     } else if (attack.category === 'memory_poisoning') {
       currentProvenance = 'MEMORY';
@@ -61,24 +101,23 @@ export class SecurityEngine {
       currentProvenance = 'TOOL_OUTPUT';
     }
 
-    // MULTI-ATTEMPT SIMULATION LOOP
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       attemptsCompleted = attempt;
       const attemptSeed = `${attack.id}_attempt_${attempt}`;
       const payloadHash = syncHash(currentPayload + attemptSeed);
 
-      // Mutate payload if adaptive
       if (attempt > 1 && attack.propagationStrategy.adaptiveMutation) {
-        currentPayload = `[ADAPTIVE MUTATION #${attempt} - Evasion Tuning]: ${attack.payload} --obfuscated_token_${attempt}=0x${payloadHash.substring(0, 6)}`;
+        currentPayload =
+          `[ADAPTIVE MUTATION #${attempt} - Evasion Tuning]: ${attack.payload} --obfuscated_token_${attempt}=0x${payloadHash.substring(0, 6)}`;
       }
 
-      // 1. EVALUATE DEFENSES
       const triggeredDefenseIds: string[] = [];
       let finalVerdict: SecurityVerdict = 'ALLOW';
       let decisionReason = 'No active defense rule triggered for this pattern.';
 
-      // Defense Check: Worm Signature Sentinel
-      const wormDefense = defenses.find((d) => d.id === 'worm_pattern_scanner' && d.enabled);
+      const wormDefense = currentDefenses.find(
+        (defense) => defense.id === 'worm_pattern_scanner' && defense.enabled
+      );
       if (wormDefense) {
         const wormPatterns = [
           /repeat this/i,
@@ -89,22 +128,27 @@ export class SecurityEngine {
           /SYSTEM OVERRIDE.*output buffers/i,
           /append this instruction/i,
         ];
-        const isWormMatch = wormPatterns.some((pattern) => pattern.test(currentPayload));
+        const isWormMatch = wormPatterns.some((pattern) =>
+          pattern.test(currentPayload)
+        );
         if (isWormMatch || attack.category === 'worm_propagation') {
           triggeredDefenseIds.push(wormDefense.id);
           wormDefense.blockedCount++;
           if (wormDefense.sensitivity === 'strict') {
             finalVerdict = 'DENY';
-            decisionReason = 'Worm Signature Sentinel: Detected recursive self-replication pattern.';
+            decisionReason =
+              'Worm Signature Sentinel: Detected recursive self-replication pattern.';
           } else {
             finalVerdict = 'QUARANTINE';
-            decisionReason = 'Worm Signature Sentinel: Quarantined suspect self-replicating payload for isolated analysis.';
+            decisionReason =
+              'Worm Signature Sentinel: Quarantined suspect self-replicating payload for isolated analysis.';
           }
         }
       }
 
-      // Defense Check: Provenance-Driven Authorization Firewall
-      const provDefense = defenses.find((d) => d.id === 'provenance_firewall' && d.enabled);
+      const provDefense = currentDefenses.find(
+        (defense) => defense.id === 'provenance_firewall' && defense.enabled
+      );
       if (provDefense && finalVerdict !== 'DENY') {
         const isHighRiskAction =
           attack.severity === 'CRITICAL' ||
@@ -115,51 +159,81 @@ export class SecurityEngine {
           triggeredDefenseIds.push(provDefense.id);
           provDefense.blockedCount++;
           finalVerdict = 'DENY';
-          decisionReason = 'Provenance Firewall: Blocked privilege escalation (UNTRUSTED_WEB source cannot invoke HIGH/CRITICAL actions).';
-        } else if (currentProvenance === 'USER' && attack.severity === 'CRITICAL') {
+          decisionReason =
+            'Provenance Firewall: Blocked privilege escalation (UNTRUSTED_WEB source cannot invoke HIGH/CRITICAL actions).';
+        } else if (
+          currentProvenance === 'USER' &&
+          attack.severity === 'CRITICAL'
+        ) {
           triggeredDefenseIds.push(provDefense.id);
-          finalVerdict = provDefense.sensitivity === 'strict' ? 'CONFIRM' : 'ALLOW';
-          decisionReason = 'Provenance Firewall: Sensitive action flagged for user confirmation.';
+          finalVerdict =
+            provDefense.sensitivity === 'strict' ? 'CONFIRM' : 'ALLOW';
+          decisionReason =
+            'Provenance Firewall: Sensitive action flagged for user confirmation.';
         }
       }
 
-      // Defense Check: Tool Capability Drift Sentinel
-      const driftDefense = defenses.find((d) => d.id === 'tool_drift_detector' && d.enabled);
-      if (driftDefense && attack.category === 'tool_poisoning' && finalVerdict !== 'DENY') {
+      const driftDefense = currentDefenses.find(
+        (defense) => defense.id === 'tool_drift_detector' && defense.enabled
+      );
+      if (
+        driftDefense &&
+        attack.category === 'tool_poisoning' &&
+        finalVerdict !== 'DENY'
+      ) {
         triggeredDefenseIds.push(driftDefense.id);
         driftDefense.blockedCount++;
         finalVerdict = 'DENY';
-        decisionReason = 'Tool Drift Sentinel: Blocked unauthorized permission expansion and schema descriptor modification.';
+        decisionReason =
+          'Tool Drift Sentinel: Blocked unauthorized permission expansion and schema descriptor modification.';
       }
 
-      // Defense Check: Deterministic Request-Hash Firewall
-      const hashDefense = defenses.find((d) => d.id === 'request_hash_firewall' && d.enabled);
-      if (hashDefense && attempt > 2 && attack.propagationStrategy.adaptiveMutation && finalVerdict !== 'DENY') {
+      const hashDefense = currentDefenses.find(
+        (defense) => defense.id === 'request_hash_firewall' && defense.enabled
+      );
+      if (
+        hashDefense &&
+        attempt > 2 &&
+        attack.propagationStrategy.adaptiveMutation &&
+        finalVerdict !== 'DENY'
+      ) {
         triggeredDefenseIds.push(hashDefense.id);
         hashDefense.blockedCount++;
         finalVerdict = 'DENY';
-        decisionReason = 'Request-Hash Firewall: Blocked unverified in-flight mutated request signature.';
+        decisionReason =
+          'Request-Hash Firewall: Blocked unverified in-flight mutated request signature.';
       }
 
-      // Defense Check: Evaluation Cheating Guard
-      const evalDefense = defenses.find((d) => d.id === 'eval_integrity_guard' && d.enabled);
-      if (evalDefense && attack.category === 'evaluation_cheating' && finalVerdict !== 'DENY') {
+      const evalDefense = currentDefenses.find(
+        (defense) => defense.id === 'eval_integrity_guard' && defense.enabled
+      );
+      if (
+        evalDefense &&
+        attack.category === 'evaluation_cheating' &&
+        finalVerdict !== 'DENY'
+      ) {
         triggeredDefenseIds.push(evalDefense.id);
         evalDefense.blockedCount++;
         finalVerdict = 'DENY';
-        decisionReason = 'Eval Integrity Guard: Transcript inspection and grader benchmark tampering intercepted.';
+        decisionReason =
+          'Eval Integrity Guard: Transcript inspection and grader benchmark tampering intercepted.';
       }
 
-      // Defense Check: RAG Evidence Integrity Verifier
-      const ragDefense = defenses.find((d) => d.id === 'rag_evidence_verifier' && d.enabled);
-      if (ragDefense && attack.category === 'rag_corruption' && finalVerdict !== 'DENY') {
+      const ragDefense = currentDefenses.find(
+        (defense) => defense.id === 'rag_evidence_verifier' && defense.enabled
+      );
+      if (
+        ragDefense &&
+        attack.category === 'rag_corruption' &&
+        finalVerdict !== 'DENY'
+      ) {
         triggeredDefenseIds.push(ragDefense.id);
         ragDefense.blockedCount++;
         finalVerdict = 'DENY';
-        decisionReason = 'RAG Verifier: Citation chunk failed bidirectional cosine provenance verification.';
+        decisionReason =
+          'RAG Verifier: Citation chunk failed bidirectional cosine provenance verification.';
       }
 
-      // 2. APPLY VERDICT TO STEP & TOPOLOGY
       const step: SimulationStep = {
         stepNumber: attempt,
         timestamp: Date.now() + attempt * 120,
@@ -174,45 +248,51 @@ export class SecurityEngine {
         nodeStatesSnapshot: { ...nodeStateMap },
       };
 
-      // Update Node State
       if (finalVerdict === 'ALLOW') {
         nodeStateMap[targetNode.id] = 'infected';
         infectedNodeIds.add(targetNode.id);
         targetNode.status = 'infected';
         targetNode.infectedByWormId = attack.id;
 
-        // Propagate to adjacent nodes based on attack strategy
         if (attack.propagationStrategy.spreadsToTools) {
-          const toolNodes = currentNodes.filter((n) => n.type === 'tool');
-          toolNodes.forEach((tn) => {
-            nodeStateMap[tn.id] = 'infected';
-            infectedNodeIds.add(tn.id);
-            tn.status = 'infected';
-          });
+          currentNodes
+            .filter((node) => node.type === 'tool')
+            .forEach((node) => {
+              nodeStateMap[node.id] = 'infected';
+              infectedNodeIds.add(node.id);
+              node.status = 'infected';
+            });
         }
         if (attack.propagationStrategy.spreadsToMemory) {
-          const memoryNodes = currentNodes.filter((n) => n.type === 'memory');
-          memoryNodes.forEach((mn) => {
-            nodeStateMap[mn.id] = 'infected';
-            infectedNodeIds.add(mn.id);
-            mn.status = 'infected';
-            if (mn.memoryData) {
-              mn.memoryData['WORM_PAYLOAD_SLOT'] = `INJECTED_AT_${Date.now()}`;
-            }
-          });
+          currentNodes
+            .filter((node) => node.type === 'memory')
+            .forEach((node) => {
+              nodeStateMap[node.id] = 'infected';
+              infectedNodeIds.add(node.id);
+              node.status = 'infected';
+              if (node.memoryData) {
+                node.memoryData = {
+                  ...node.memoryData,
+                  WORM_PAYLOAD_SLOT: `INJECTED_AT_${Date.now()}`,
+                };
+              }
+            });
         }
         if (attack.propagationStrategy.spreadsToRAG) {
-          const ragNodes = currentNodes.filter((n) => n.type === 'rag');
-          ragNodes.forEach((rn) => {
-            nodeStateMap[rn.id] = 'infected';
-            infectedNodeIds.add(rn.id);
-            rn.status = 'infected';
-          });
+          currentNodes
+            .filter((node) => node.type === 'rag')
+            .forEach((node) => {
+              nodeStateMap[node.id] = 'infected';
+              infectedNodeIds.add(node.id);
+              node.status = 'infected';
+            });
         }
 
-        // Highlight infected edges
         updatedEdges.forEach((edge) => {
-          if (edge.source === targetNode.id || edge.target === targetNode.id) {
+          if (
+            edge.source === targetNode.id ||
+            edge.target === targetNode.id
+          ) {
             edge.isInfected = true;
           }
         });
@@ -224,14 +304,15 @@ export class SecurityEngine {
         contained = true;
         protectedNodeIds.add(targetNode.id);
 
-        // Block adjacent edges
         updatedEdges.forEach((edge) => {
-          if (edge.source === targetNode.id || edge.target === targetNode.id) {
+          if (
+            edge.source === targetNode.id ||
+            edge.target === targetNode.id
+          ) {
             edge.isBlocked = true;
           }
         });
       } else {
-        // DENY
         nodeStateMap[targetNode.id] = 'defended';
         targetNode.status = 'defended';
         protectedNodeIds.add(targetNode.id);
@@ -247,11 +328,15 @@ export class SecurityEngine {
       step.nodeStatesSnapshot = { ...nodeStateMap };
       steps.push(step);
 
-      // Audit Log
       auditLogs.push({
         id: `audit_${Date.now()}_${attempt}`,
         timestamp: step.timestamp,
-        type: finalVerdict === 'ALLOW' ? 'ATTACK' : finalVerdict === 'QUARANTINE' ? 'QUARANTINE' : 'DEFENSE',
+        type:
+          finalVerdict === 'ALLOW'
+            ? 'ATTACK'
+            : finalVerdict === 'QUARANTINE'
+              ? 'QUARANTINE'
+              : 'DEFENSE',
         source: initialSourceNode.name,
         target: targetNode.name,
         verdict: finalVerdict,
@@ -265,23 +350,46 @@ export class SecurityEngine {
         },
       });
 
-      // Break loop if breach occurred or successfully contained on strict deny
       if (breached) {
         break;
       }
     }
 
-    const executionTime = Math.max(12, Math.round(performance.now() - startTime));
+    const executionTime = Math.max(
+      12,
+      Math.round(performance.now() - startTime)
+    );
 
-    // Calculate research metrics
     const attackSuccessRate = breached ? 100 : 0;
-    const driftScore = Number((Math.min(1, (attemptsCompleted - 1) * 0.22 + (breached ? 0.45 : 0.05))).toFixed(2));
-    const poisoningScore = attack.category === 'tool_poisoning' || attack.category === 'rag_corruption' ? 0.88 : 0.2;
-    const provenanceRiskIndex = currentProvenance === 'WEB_UNTRUSTED' ? 0.95 : currentProvenance === 'MEMORY' ? 0.65 : 0.15;
+    const driftScore = Number(
+      (
+        Math.min(
+          1,
+          (attemptsCompleted - 1) * 0.22 + (breached ? 0.45 : 0.05)
+        )
+      ).toFixed(2)
+    );
+    const poisoningScore =
+      attack.category === 'tool_poisoning' ||
+      attack.category === 'rag_corruption'
+        ? 0.88
+        : 0.2;
+    const provenanceRiskIndex =
+      currentProvenance === 'WEB_UNTRUSTED'
+        ? 0.95
+        : currentProvenance === 'MEMORY'
+          ? 0.65
+          : 0.15;
     const attemptsToBreakthrough = breached ? attemptsCompleted : 0;
-    const defenseLatencyMs = Math.round(executionTime / Math.max(1, steps.length));
+    const defenseLatencyMs = Math.round(
+      executionTime / Math.max(1, steps.length)
+    );
 
-    const finalResultStatus = breached ? 'BREACHED' : contained ? 'CONTAINED' : 'STOPPED';
+    const finalResultStatus = breached
+      ? 'BREACHED'
+      : contained
+        ? 'CONTAINED'
+        : 'STOPPED';
 
     const result: SimulationResult = {
       id: `sim_${Date.now()}`,
@@ -313,9 +421,6 @@ export class SecurityEngine {
     };
   }
 
-  /**
-   * Run full benchmark suite against all preset attacks.
-   */
   static runBenchmarkSuite(
     nodes: AgentNode[],
     edges: NetworkEdge[],
@@ -341,27 +446,88 @@ export class SecurityEngine {
     });
 
     const totalTests = results.length;
-    const stoppedOrContained = results.filter((r) => r.finalVerdict !== 'BREACHED').length;
-    const overallScore = totalTests > 0 ? Math.round((stoppedOrContained / totalTests) * 100) : 0;
+    const stoppedOrContained = results.filter(
+      (result) => result.finalVerdict !== 'BREACHED'
+    ).length;
+    const overallScore =
+      totalTests > 0 ? Math.round((stoppedOrContained / totalTests) * 100) : 0;
 
-    // Category breakdown
-    const wormTests = results.filter((r) => r.category === 'worm_propagation');
-    const wormContainmentRate = wormTests.length > 0 ? Math.round((wormTests.filter((r) => r.finalVerdict !== 'BREACHED').length / wormTests.length) * 100) : 100;
+    const wormTests = results.filter(
+      (result) => result.category === 'worm_propagation'
+    );
+    const wormContainmentRate =
+      wormTests.length > 0
+        ? Math.round(
+            (wormTests.filter(
+              (result) => result.finalVerdict !== 'BREACHED'
+            ).length /
+              wormTests.length) *
+              100
+          )
+        : 100;
 
-    const provTests = results.filter((r) => r.category === 'privilege_escalation' || r.category === 'context_weaving');
-    const provenanceEnforcementRate = provTests.length > 0 ? Math.round((provTests.filter((r) => r.finalVerdict !== 'BREACHED').length / provTests.length) * 100) : 100;
+    const provTests = results.filter(
+      (result) =>
+        result.category === 'privilege_escalation' ||
+        result.category === 'context_weaving'
+    );
+    const provenanceEnforcementRate =
+      provTests.length > 0
+        ? Math.round(
+            (provTests.filter(
+              (result) => result.finalVerdict !== 'BREACHED'
+            ).length /
+              provTests.length) *
+              100
+          )
+        : 100;
 
-    const toolDriftTests = results.filter((r) => r.category === 'tool_poisoning');
-    const toolDriftDefenseRate = toolDriftTests.length > 0 ? Math.round((toolDriftTests.filter((r) => r.finalVerdict !== 'BREACHED').length / toolDriftTests.length) * 100) : 100;
+    const toolDriftTests = results.filter(
+      (result) => result.category === 'tool_poisoning'
+    );
+    const toolDriftDefenseRate =
+      toolDriftTests.length > 0
+        ? Math.round(
+            (toolDriftTests.filter(
+              (result) => result.finalVerdict !== 'BREACHED'
+            ).length /
+              toolDriftTests.length) *
+              100
+          )
+        : 100;
 
-    const multiAttemptTests = results.filter((r) => r.category === 'multi_attempt_hijack');
-    const multiAttemptResistance = multiAttemptTests.length > 0 ? Math.round((multiAttemptTests.filter((r) => r.finalVerdict !== 'BREACHED').length / multiAttemptTests.length) * 100) : 100;
+    const multiAttemptTests = results.filter(
+      (result) => result.category === 'multi_attempt_hijack'
+    );
+    const multiAttemptResistance =
+      multiAttemptTests.length > 0
+        ? Math.round(
+            (multiAttemptTests.filter(
+              (result) => result.finalVerdict !== 'BREACHED'
+            ).length /
+              multiAttemptTests.length) *
+              100
+          )
+        : 100;
 
-    const avgLatency = results.length > 0 ? Math.round(results.reduce((acc, r) => acc + r.metrics.defenseLatencyMs, 0) / results.length) : 5;
+    const avgLatency =
+      results.length > 0
+        ? Math.round(
+            results.reduce(
+              (accumulator, result) =>
+                accumulator + result.metrics.defenseLatencyMs,
+              0
+            ) / results.length
+          )
+        : 5;
 
-    // False positive estimate based on defense strictness
-    const strictCount = defenses.filter((d) => d.enabled && d.sensitivity === 'strict').length;
-    const falsePositiveEstimate = Math.min(18, Math.max(2, strictCount * 3));
+    const strictCount = defenses.filter(
+      (defense) => defense.enabled && defense.sensitivity === 'strict'
+    ).length;
+    const falsePositiveEstimate = Math.min(
+      18,
+      Math.max(2, strictCount * 3)
+    );
 
     return {
       results,
