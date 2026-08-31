@@ -341,6 +341,7 @@ export class SecurityEngine {
       falsePositiveEstimate: number;
       averageDefenseLatencyMs: number;
     };
+    updatedDefenses: DefenseModule[];
   } {
     const results: SimulationResult[] = [];
     let currentDefenses = defenses.map((d) => ({ ...d }));
@@ -385,6 +386,7 @@ export class SecurityEngine {
         falsePositiveEstimate,
         averageDefenseLatencyMs: avgLatency,
       },
+      updatedDefenses: currentDefenses,
     };
   }
 }
